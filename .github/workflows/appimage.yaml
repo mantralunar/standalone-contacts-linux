@@ -30,6 +30,10 @@ jobs:
             xorg-server-xvfb xorg-xauth dbus jq
       - name: Compile, test and package x86_64
         id: package
+        env:
+          ALWAYS_SOFTWARE: "1"
+          # Contacts displays still photos and does not use GTK media playback.
+          DEPLOY_GSTREAMER: "0"
         run: |
           set -eu
           ARCH=$(uname -m)
@@ -67,9 +71,15 @@ jobs:
           export STRACE_BINARY STRACE_FLAGS
 
           # The TLS provider is loaded by GIO at runtime and is absent from the linker's dependency graph.
-          XDG_DATA_HOME="$scratch/trace-data" GTK_A11Y=none GSK_RENDERER=cairo \
+          XDG_DATA_HOME="$scratch/trace-data" GTK_A11Y=none GSK_RENDERER=cairo GDK_DISABLE=gl,vulkan \
               dbus-run-session -- xvfb-run -a quick-sharun \
               "$scratch/install/usr/bin/standalone-contacts" /usr/lib/gio/modules/libgiognutls.so
+          mesa_driver=$(find AppDir \( -name 'libgallium*.so*' -o -name '*_dri.so' \
+              -o -name 'libGLX_mesa.so*' -o -name 'libEGL_mesa.so*' \) -print -quit)
+          if [ -n "$mesa_driver" ]; then
+              printf 'Unexpected Mesa driver in AppDir: %s\n' "$mesa_driver" >&2
+              exit 1
+          fi
           quick-sharun --make-appimage
           set -- "$OUTPATH"/*.AppImage
           if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
@@ -77,8 +87,9 @@ jobs:
               exit 1
           fi
           image=$1
+          du -h "$image"
           APPIMAGE_EXTRACT_AND_RUN=1 "$image" --version
-          export APPIMAGE_EXTRACT_AND_RUN=1 GSK_RENDERER=cairo GTK_A11Y=none
+          export APPIMAGE_EXTRACT_AND_RUN=1 GTK_A11Y=none
           export XDG_DATA_HOME="$scratch/test-data"
           timeout 90 dbus-run-session -- xvfb-run -a "$image" --smoke-test
           destination="$GITHUB_WORKSPACE/dist"
