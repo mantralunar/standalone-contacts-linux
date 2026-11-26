@@ -55,6 +55,19 @@ void test_edit_fields () {
     } catch (Error error) { assert_not_reached (); }
 }
 
+void test_field_lookup_skips_photo () {
+    try {
+        var photo = new StringBuilder ("PHOTO;ENCODING=b:AQID\r\n");
+        for (int i = 0; i < 1200; i++) photo.append (" AQIDAQIDAQIDAQID\r\n");
+        var card = new VCard (ORIGINAL.replace ("item1.EMAIL;TYPE=HOME:hi@example.test\r\n",
+            photo.str + "item1.EMAIL;TYPE=HOME\r\n :hi@example.\r\n test\r\n"));
+        assert (card.name == "Old Name");
+        assert (card.folded_name == "old name");
+        assert (card.read ("EMAIL") == "hi@example.test");
+        assert (card.read ("TEL") == "");
+    } catch (Error error) { assert_not_reached (); }
+}
+
 void test_incomplete () {
     try {
         VCard.parse_file (ORIGINAL + "BEGIN:VCARD\nFN:Truncated");
@@ -63,11 +76,47 @@ void test_incomplete () {
     } catch (Error error) { assert_not_reached (); }
 }
 
+async void check_streaming () throws Error {
+    var body = new StringBuilder ("BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Large\r\nX-KEEP:");
+    for (int i = 0; i < 70000; i++) body.append_c ('x');
+    body.append ("\r\nEND:VCARD\r\n");
+    string second = ORIGINAL.replace ("\r\n", "\n").chomp ();
+    string input = body.str + "\r\n" + second;
+    var stream = new MemoryInputStream.from_bytes (new Bytes (input.data));
+    var reader = new VCardReader (stream);
+    var first_card = yield reader.next ();
+    var second_card = yield reader.next ();
+    assert (first_card != null && first_card.raw == body.str);
+    assert (second_card != null && second_card.raw == second);
+    var last = yield reader.next ();
+    assert (last == null && reader.bytes_read == (uint64) input.length);
+
+    string truncated = ORIGINAL + "BEGIN:VCARD\nFN:Incomplete";
+    reader = new VCardReader (new MemoryInputStream.from_bytes (new Bytes (truncated.data)));
+    yield reader.next ();
+    try {
+        yield reader.next ();
+        assert_not_reached ();
+    } catch (Failure.INVALID expected) {}
+}
+
+void test_streaming () {
+    var loop = new MainLoop ();
+    check_streaming.begin ((source, result) => {
+        try { check_streaming.end (result); }
+        catch (Error error) { Test.message ("%s", error.message); Test.fail (); }
+        loop.quit ();
+    });
+    loop.run ();
+}
+
 int main (string[] args) {
     Test.init (ref args);
     Test.add_func ("/vcard/round-trip", test_round_trip);
     Test.add_func ("/vcard/utf8-fold", test_fold);
     Test.add_func ("/vcard/edit-fields", test_edit_fields);
+    Test.add_func ("/vcard/field-lookup-skips-photo", test_field_lookup_skips_photo);
+    Test.add_func ("/vcard/streaming", test_streaming);
     Test.add_func ("/vcard/reject-incomplete-file", test_incomplete);
     return Test.run ();
 }

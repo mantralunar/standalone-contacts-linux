@@ -3,11 +3,29 @@ namespace Contacts {
 
     class VCard : Object {
         public string raw { get; private set; }
-        public string name { owned get { return read ("FN"); } }
+        private string? cached_name;
+        private string? cached_folded_name;
+        public string name {
+            owned get {
+                if (cached_name == null) cached_name = read ("FN");
+                return cached_name;
+            }
+        }
+        public string folded_name {
+            owned get {
+                if (cached_folded_name == null) cached_folded_name = name.casefold ();
+                return cached_folded_name;
+            }
+        }
 
         public VCard (string raw) throws Failure {
-            if (!raw.validate () || !raw.strip ().up ().has_prefix ("BEGIN:VCARD")
-                || !raw.strip ().up ().has_suffix ("END:VCARD"))
+            int start = 0;
+            int end = raw.length;
+            while (start < end && raw[start].isspace ()) start++;
+            while (end > start && raw[end - 1].isspace ()) end--;
+            if (end - start < 20 || !raw.validate () ||
+                raw.substring (start, 11).ascii_up () != "BEGIN:VCARD" ||
+                raw.substring (end - 9, 9).ascii_up () != "END:VCARD")
                 throw new Failure.INVALID ("Expected a UTF-8 vCard.");
             this.raw = raw;
         }
@@ -40,18 +58,58 @@ namespace Contacts {
             return line.str;
         }
 
-        public string read (string key) {
-            string[] lines = raw.split ("\n");
-            for (int i = 0; i < lines.length; i++) {
-                var line = logical_line (lines, ref i);
-                int colon = separator (line);
-                if (property_name (line, colon) == key) {
-                    string value = line.substring (colon + 1);
-                    int units = key == "ORG" ? organisation_separator (value) : -1;
-                    return unescape (units >= 0 ? value.substring (0, units) : value);
+        // Scan physical lines without copying unrelated properties such as folded PHOTO data.
+        private string? find_property (string key) {
+            int limit = raw.length;
+            int start = 0;
+            while (start < limit) {
+                int end = raw.index_of_char ('\n', start);
+                if (end < 0) end = limit;
+                bool continuation = raw[start] == ' ' || raw[start] == '\t';
+                if (continuation) {
+                    start = end + 1;
+                    continue;
                 }
+                bool folded = end + 1 < limit && (raw[end + 1] == ' ' || raw[end + 1] == '\t');
+                bool quoted = false;
+                int colon = start;
+                for (; colon < end; colon++) {
+                    if (raw[colon] == '"') quoted = !quoted;
+                    if (raw[colon] == ':' && !quoted) break;
+                }
+                if (colon < end && property_name (raw.substring (start, colon - start),
+                    colon - start) != key) {
+                    start = end + 1;
+                    continue;
+                }
+                if (colon == end && !folded) {
+                    start = end + 1;
+                    continue;
+                }
+
+                var line = new StringBuilder ();
+                int part_start = start;
+                while (true) {
+                    int trim_end = end > part_start && raw[end - 1] == '\r' ? end - 1 : end;
+                    line.append_len (raw.offset (part_start), trim_end - part_start);
+                    start = end + 1;
+                    if (start >= limit || (raw[start] != ' ' && raw[start] != '\t')) break;
+                    part_start = start + 1;
+                    end = raw.index_of_char ('\n', part_start);
+                    if (end < 0) end = limit;
+                }
+                int value_start = separator (line.str);
+                if (property_name (line.str, value_start) == key) return line.str;
             }
-            return "";
+            return null;
+        }
+
+        public string read (string key) {
+            string? line = find_property (key);
+            if (line == null) return "";
+            string value = line.substring (separator (line) + 1);
+            int units = key == "ORG" ? organisation_separator (value) : -1;
+            return unescape (units >= 0 ? value.substring (0, units) : value);
         }
 
         private static string unescape (string value) {
@@ -197,4 +255,72 @@ namespace Contacts {
             return cards;
         }
     }
+
+    class VCardReader : Object {
+        private InputStream input;
+        private Bytes chunk = new Bytes (null);
+        private size_t offset;
+        private bool eof;
+        private bool saw_card;
+        public uint64 bytes_read { get; private set; }
+
+        public VCardReader (InputStream input) {
+            this.input = input;
+        }
+
+        private async string? next_line () throws Error {
+            var line = new StringBuilder ();
+            while (!eof) {
+                if (offset == chunk.get_size ()) {
+                    chunk = yield input.read_bytes_async (64 * 1024, Priority.DEFAULT, null);
+                    offset = 0;
+                    bytes_read += chunk.get_size ();
+                    if (chunk.get_size () == 0) {
+                        eof = true;
+                        break;
+                    }
+                }
+                unowned uint8[] data = (!) chunk.get_data ();
+                size_t start = offset;
+                while (offset < chunk.get_size ()) {
+                    uint8 value = data[offset++];
+                    if (value == 0) throw new Failure.INVALID ("The vCard file contains a NUL byte.");
+                    if (value == '\n') break;
+                }
+                line.append_len ((string) ((uint8*) data + start), (ssize_t) (offset - start));
+                if (data[offset - 1] == '\n') break;
+            }
+            return line.len == 0 ? null : line.str;
+        }
+
+        public async VCard? next () throws Error {
+            var card = new StringBuilder ();
+            string? line;
+            while ((line = yield next_line ()) != null) {
+                // Compare only the marker-sized lines. A photo may occupy a very long line.
+                string marker = "";
+                if (line.length <= 13) {
+                    int length = line.length;
+                    if (length > 0 && line[length - 1] == '\n') length--;
+                    if (length > 0 && line[length - 1] == '\r') length--;
+                    marker = line.substring (0, length).ascii_up ();
+                }
+                if (marker == "BEGIN:VCARD" && card.len == 0) {
+                    card.append (line);
+                } else if (marker == "BEGIN:VCARD" || (card.len == 0 && line.strip () != "")) {
+                    throw new Failure.INVALID ("Unexpected content in the vCard file.");
+                } else if (card.len != 0) {
+                    card.append (line);
+                    if (marker == "END:VCARD") {
+                        saw_card = true;
+                        return new VCard (card.str);
+                    }
+                }
+            }
+            if (card.len != 0 || !saw_card)
+                throw new Failure.INVALID ("Missing or incomplete vCard.");
+            return null;
+        }
+    }
+
 }

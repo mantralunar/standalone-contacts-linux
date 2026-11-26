@@ -11,6 +11,8 @@ namespace Contacts {
         private Gtk.DropDown book_menu;
         private Gtk.SearchEntry search = new Gtk.SearchEntry ();
         private Gtk.ListBox list = new Gtk.ListBox ();
+        private Gtk.Adjustment sidebar_scroll;
+        private uint thumbnail_tick;
         private Gtk.Box details = new Gtk.Box (Gtk.Orientation.VERTICAL, 12);
         private Gtk.Label status = new Gtk.Label ("");
         private Gtk.Button add_book;
@@ -80,6 +82,9 @@ namespace Contacts {
             list_scroll.hscrollbar_policy = Gtk.PolicyType.NEVER;
             list_scroll.vexpand = true;
             list_scroll.child = list;
+            sidebar_scroll = list_scroll.get_vadjustment ();
+            sidebar_scroll.changed.connect (queue_sidebar_photos);
+            sidebar_scroll.value_changed.connect (queue_sidebar_photos);
             sidebar.append (list_scroll);
             var transfer = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 6);
             transfer.margin_bottom = 8;
@@ -129,6 +134,7 @@ namespace Contacts {
                 close_contact_menu ();
                 list.unselect_all ();
                 list.invalidate_filter ();
+                queue_sidebar_photos ();
             });
             list.selected_rows_changed.connect (update_selection);
             add_contact_menu_controls ();
@@ -202,7 +208,7 @@ namespace Contacts {
             close_contact_menu ();
             Gtk.Widget? child;
             while ((child = list.get_first_child ()) != null) list.remove (child);
-            contacts.sort ((a, b) => a.card.name.casefold ().collate (b.card.name.casefold ()));
+            contacts.sort ((a, b) => a.card.folded_name.collate (b.card.folded_name));
             ContactRow? keep_row = null;
             foreach (Contact contact in contacts) {
                 var row = new ContactRow (contact);
@@ -212,6 +218,26 @@ namespace Contacts {
             if (keep_row != null) list.select_row (keep_row);
             update_selection ();
             update_controls ();
+            queue_sidebar_photos ();
+        }
+
+        private void queue_sidebar_photos () {
+            if (thumbnail_tick != 0) return;
+            thumbnail_tick = list.add_tick_callback (() => {
+                int top = (int) sidebar_scroll.value;
+                int bottom = top + (int) sidebar_scroll.page_size;
+                int remaining = 2;
+                // Rows contain a 34 px avatar, so a 16 px stride visits every visible row.
+                for (int y = top; y < bottom; y += 16) {
+                    var row = list.get_row_at_y (y) as ContactRow;
+                    if (row == null || row.photo_loaded) continue;
+                    if (remaining == 0) return Source.CONTINUE;
+                    row.load_photo ();
+                    remaining--;
+                }
+                thumbnail_tick = 0;
+                return Source.REMOVE;
+            });
         }
 
         private void show_details (int selection_count = 0) {
@@ -681,29 +707,54 @@ namespace Contacts {
                 var picker = new Gtk.FileDialog ();
                 picker.title = "Import vCards";
                 File file = yield picker.open (this, null);
-                uint8[] bytes;
-                yield file.load_contents_async (null, out bytes, null);
-                foreach (uint8 value in bytes) {
-                    if (value == 0) throw new Failure.INVALID ("The vCard file contains a NUL byte.");
+                status.label = "Checking vCard file…";
+                uint total = 0;
+                uint64 file_size = 0;
+                var stream = yield file.read_async (Priority.DEFAULT, null);
+                try {
+                    var reader = new VCardReader (stream);
+                    while ((yield reader.next ()) != null) total++;
+                    file_size = reader.bytes_read;
+                } finally {
+                    try { stream.close (null); }
+                    catch (Error ignored) {}
                 }
-                var cards = VCard.parse_file ((string) bytes);
+
                 string token = yield store.token (current);
                 Error? upload_error = null;
-                foreach (VCard card in cards) {
-                    try {
-                        yield dav.put (current, token, current.url + Uuid.string_random () + ".vcf", null, card);
+                bool defer_refresh = file_size >= 16 * 1024 * 1024;
+                stream = yield file.read_async (Priority.DEFAULT, null);
+                try {
+                    var reader = new VCardReader (stream);
+                    VCard? card;
+                    status.label = "Importing %u contacts…".printf (total);
+                    while ((card = yield reader.next ()) != null) {
+                        yield dav.put (current, token,
+                            current.url + Uuid.string_random () + ".vcf", null, card);
                         imported++;
-                    } catch (Error error) {
-                        upload_error = error;
-                        break;
+                        status.label = "Imported %u of %u contacts…".printf (imported, total);
+                    }
+                } catch (Error error) {
+                    upload_error = error;
+                } finally {
+                    try { stream.close (null); }
+                    catch (Error ignored) {}
+                }
+                if (imported > 0) {
+                    if (defer_refresh) {
+                        status.label = "%u contacts uploaded · Refresh to update the list".printf (imported);
+                    } else {
+                        yield reload (current, token);
                     }
                 }
-                if (imported > 0) yield reload (current, token);
                 if (upload_error != null) throw upload_error;
                 notice ("%u contacts imported.".printf (imported));
             } catch (Error error) {
-                if (!(error is Gtk.DialogError.DISMISSED))
+                if (!(error is Gtk.DialogError.DISMISSED)) {
+                    status.label = imported == 0 ? "Import failed."
+                        : "%u contacts uploaded · Refresh to update the list".printf (imported);
                     notice (imported == 0 ? error.message : "%u uploaded. %s".printf (imported, error.message));
+                }
             }
             busy = false;
             update_controls ();
@@ -743,6 +794,9 @@ namespace Contacts {
     class ContactRow : Gtk.ListBoxRow {
         public Contact contact;
         public string index_text;
+        public bool photo_loaded { get; private set; }
+        private Adw.Avatar avatar;
+
         public ContactRow (Contact contact) {
             this.contact = contact;
             string name = contact.card.name;
@@ -750,12 +804,24 @@ namespace Contacts {
                 + contact.card.read ("TEL")).casefold ();
             var line = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 10);
             line.margin_top = line.margin_bottom = 4;
-            line.append (contact_avatar (contact, 34));
+            avatar = new Adw.Avatar (34, name, true);
+            line.append (avatar);
             var label = new Gtk.Label (name == "" ? "Unnamed contact" : name);
             label.ellipsize = Pango.EllipsizeMode.END;
             label.xalign = 0;
             line.append (label);
             child = line;
+        }
+
+        public void load_photo () {
+            photo_loaded = true;
+            var photo = contact.card.photo ();
+            if (photo == null) return;
+            try {
+                var stream = new MemoryInputStream.from_bytes (photo);
+                var thumbnail = new Gdk.Pixbuf.from_stream_at_scale (stream, 68, 68, true);
+                avatar.custom_image = Gdk.Texture.for_pixbuf (thumbnail);
+            } catch (Error ignored) {}
         }
     }
 
@@ -793,7 +859,7 @@ namespace Contacts {
 
     int main (string[] args) {
         if (args.length == 2 && args[1] == "--version") {
-            stdout.printf ("Contacts 0.3.4\n");
+            stdout.printf ("Contacts 0.3.6\n");
             return 0;
         }
         bool smoke = args.length == 2 && args[1] == "--smoke-test";

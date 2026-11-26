@@ -5,14 +5,14 @@ A desktop CardDAV client written in Vala with GTK4, libadwaita, libsoup 3 and li
 ## Publish an AppImage
 
 1. Extract the source archive and upload its **contents** to the root of an empty GitHub repository. Include the hidden `.github` directory. Git push is the simplest way to include hidden files.
-2. Once the workflow is on the default branch, open **Actions → Anylinux AppImage Release → Run workflow**, select `main`, and click **Run workflow**. The workflow uses the version in `meson.build` and creates the matching tag for that commit if needed. Pushing a matching tag such as `v0.3.4` also starts the workflow. Bump the Meson version before releasing a different commit.
+2. Once the workflow is on the default branch, open **Actions → Anylinux AppImage Release → Run workflow**, select `main`, and click **Run workflow**. The workflow uses the version in `meson.build` and creates the matching tag for that commit if needed. Pushing a matching tag such as `v0.3.6` also starts the workflow. Bump the Meson version before releasing a different commit.
 
-   GitHub Actions builds and tests the app on x86_64 using pkgforge's Arch Linux container, the Anylinux setup action, and quick-sharun. The AppImage uses GTK’s Cairo renderer and omits bundled Mesa drivers. After the AppImage passes its startup check, the workflow publishes it under **Releases → v0.3.4 → Assets**.
-3. Download `Contacts-0.3.4-x86_64.AppImage` from the release. Make it executable and run it:
+   GitHub Actions builds and tests the app on x86_64 using pkgforge's Arch Linux container, the Anylinux setup action, and quick-sharun. The AppImage uses GTK’s Cairo renderer and omits bundled Mesa drivers. After the AppImage passes its startup check, the workflow publishes it under **Releases → v0.3.6 → Assets**.
+3. Download `Contacts-0.3.6-x86_64.AppImage` from the release. Make it executable and run it:
 
    ```sh
-   chmod +x Contacts-0.3.4-x86_64.AppImage
-   ./Contacts-0.3.4-x86_64.AppImage
+   chmod +x Contacts-0.3.6-x86_64.AppImage
+   ./Contacts-0.3.6-x86_64.AppImage
    ```
 
    If FUSE mounting fails, run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
@@ -27,7 +27,7 @@ Use the edit button next to the address book selector to change the label, URL, 
 
 The system Secret Service stores tokens. The cache under `$XDG_DATA_HOME/standalone-contacts/` (usually `~/.local/share/standalone-contacts/`) contains book metadata and vCards in private local files. Cached contacts can be searched, viewed and exported while offline. The cache contains readable contact data and relies on the permissions and encryption of your local storage.
 
-Click **Edit** on a contact to change its name, email, phone, organisation, and notes in the contact pane. **New Contact** uses the same fields. The editor updates the first value shown for each field and preserves additional values, the structured name, organisation units, photos, and unknown vCard properties. If you clear a field with multiple values, the next remaining value will be shown. Embedded base64 photos are used for the avatars in both panes when GTK can decode them. **Export** saves the selected address book. Use **Ctrl-click** to select individual contacts or **Shift-click** to select a range. Right-click a selected contact, or focus it and press **Shift+F10**, to export the selection as one vCard file or delete it. A right-click on an unselected contact selects that contact alone. Batch deletion stops at the first server error and reports how many contacts were deleted. **Import** parses one or more cards, then uploads the original card data. If an upload fails partway through, it reports the number already uploaded.
+Click **Edit** on a contact to change its name, email, phone, organisation, and notes in the contact pane. **New Contact** uses the same fields. The editor updates the first value shown for each field and preserves additional values, the structured name, organisation units, photos, and unknown vCard properties. If you clear a field with multiple values, the next remaining value will be shown. Embedded base64 photos are used for the avatars in both panes when GTK can decode them. Sidebar thumbnails are decoded as rows come into view. **Export** saves the selected address book. Use **Ctrl-click** to select individual contacts or **Shift-click** to select a range. Right-click a selected contact, or focus it and press **Shift+F10**, to export the selection as one vCard file or delete it. A right-click on an unselected contact selects that contact alone. Batch deletion stops at the first server error and reports how many contacts were deleted. **Import** validates the file in a streaming pass, then uploads the original card data one contact at a time. For files of 16 MiB or more, click **Refresh** after the upload to update the list. If an upload fails partway through, it reports the number already uploaded.
 
 ## Sync and MVP limits
 
@@ -36,4 +36,4 @@ Click **Edit** on a contact to change its name, email, phone, organisation, and 
 - Use the real, final collection URL. The client accepts HTTPS and permits HTTP for loopback testing. Discovery supports same-origin redirects and reads CardDAV principal and address book home properties. It does not use DNS SRV discovery. Synchronisation rejects redirects and limits resource URLs to the configured collection. Server TLS certificates must be trusted by the system.
 - Sync is manual. The MVP has no offline write queue, duplicate merging, or conflict merge editor. Each configured collection has its own keyring item and cache.
 - Input must be UTF-8 with LF or CRLF line endings. Legacy vCard encodings and external photo URLs are preserved as source text where accepted but are not decoded. A server may normalize uploaded cards, so later downloads can reflect server-side changes.
-- GitHub Actions is configured to run vCard round-trip and local HTTP CardDAV discovery and conditional-request tests and to launch the generated AppImage under Xvfb, including a check for the GIO TLS backend. Multi-selection and the batch menu need a GitHub build and interactive verification. Live OpenCloud, Radicale, desktop keyring interoperability, and compatibility across distributions remain unverified. AppImage size will be known after packaging.
+- GitHub Actions is configured to run vCard round-trip and local HTTP CardDAV discovery and conditional-request tests and to launch the generated AppImage under Xvfb, including a check for the GIO TLS backend. The sidebar performance changes need a GitHub build and runtime verification. Live OpenCloud, Radicale, desktop keyring interoperability, and compatibility across distributions remain unverified. AppImage size will be known after packaging.
