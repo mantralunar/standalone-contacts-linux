@@ -13,6 +13,8 @@ namespace Contacts {
         private Gtk.Box details = new Gtk.Box (Gtk.Orientation.VERTICAL, 12);
         private Gtk.Label status = new Gtk.Label ("");
         private Gtk.Button add_book;
+        private Gtk.Button edit_book;
+        private Gtk.Button remove_book;
         private Gtk.Button refresh;
         private Gtk.Button create;
         private Gtk.Button import;
@@ -49,7 +51,17 @@ namespace Contacts {
             book_menu.tooltip_text = "Address book";
             book_menu.margin_top = 10;
             book_menu.margin_start = book_menu.margin_end = 10;
-            sidebar.append (book_menu);
+            var chooser = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 4);
+            chooser.margin_top = 10;
+            chooser.margin_start = chooser.margin_end = 10;
+            book_menu.margin_top = book_menu.margin_start = book_menu.margin_end = 0;
+            book_menu.hexpand = true;
+            chooser.append (book_menu);
+            edit_book = icon_button ("document-edit-symbolic", "Edit address book");
+            remove_book = icon_button ("list-remove-symbolic", "Remove address book");
+            chooser.append (edit_book);
+            chooser.append (remove_book);
+            sidebar.append (chooser);
             search.placeholder_text = "Search contacts";
             search.margin_start = search.margin_end = 10;
             sidebar.append (search);
@@ -98,7 +110,9 @@ namespace Contacts {
 
             foreach (Book item in store.books) book_names.append (item.label);
             book_menu.notify["selected"].connect (select_book);
-            add_book.clicked.connect (book_dialog);
+            add_book.clicked.connect (() => book_dialog (null));
+            edit_book.clicked.connect (() => book_dialog (book));
+            remove_book.clicked.connect (remove_book_dialog);
             refresh.clicked.connect (() => refresh_current.begin ());
             create.clicked.connect (() => name_dialog (null));
             import.clicked.connect (() => import_file.begin ());
@@ -125,6 +139,8 @@ namespace Contacts {
 
         private void update_controls () {
             add_book.sensitive = !busy;
+            edit_book.sensitive = !busy && book != null;
+            remove_book.sensitive = !busy && book != null;
             book_menu.sensitive = !busy && store.books.length > 0;
             refresh.sensitive = !busy && book != null;
             create.sensitive = !busy && book != null;
@@ -240,43 +256,143 @@ namespace Contacts {
             return box;
         }
 
-        private void book_dialog () {
+        private void book_dialog (Book? existing) {
             if (busy) return;
-            var dialog = new Adw.MessageDialog (this, "Add Address Book",
-                "Use the full CardDAV address book URL and the app token for your account.");
+            var dialog = new Adw.MessageDialog (this,
+                existing == null ? "Add Address Book" : "Edit Address Book",
+                existing == null
+                    ? "Find books using your server URL, or enter a full collection URL and save directly."
+                    : "Leave the app token blank to keep the current token for this account.");
             var box = form ();
             var label = input (box, "Address book name");
-            var url = input (box, "CardDAV address book URL");
+            var url = input (box, "CardDAV server or collection URL");
             var user = input (box, "Username");
             var token = input (box, "App token", true);
+            if (existing != null) {
+                label.text = existing.label;
+                url.text = existing.url;
+                user.text = existing.user;
+            }
             dialog.extra_child = box;
             dialog.add_response ("cancel", "Cancel");
-            dialog.add_response ("add", "Add");
-            dialog.default_response = "add";
-            dialog.set_response_appearance ("add", Adw.ResponseAppearance.SUGGESTED);
+            if (existing == null) dialog.add_response ("discover", "Find Books");
+            dialog.add_response ("save", "Save");
+            string primary = existing == null ? "discover" : "save";
+            dialog.default_response = primary;
+            dialog.set_response_appearance (primary, Adw.ResponseAppearance.SUGGESTED);
             dialog.response.connect ((answer) => {
-                if (answer != "add") return;
+                if (answer == "cancel") return;
                 string password = token.text;
                 token.text = "";
-                add_address_book.begin (label.text, url.text, user.text, password);
+                if (answer == "discover")
+                    discover_books.begin (url.text, user.text, password);
+                else if (answer == "save")
+                    save_address_book.begin (existing, label.text, url.text, user.text, password);
             });
             dialog.present ();
         }
 
-        private async void add_address_book (string label, string url, string user, string token) {
+        private async void discover_books (string url, string username, string token) {
             if (busy) return;
             busy = true;
             update_controls ();
             try {
-                if (label.strip () == "" || user.strip () == "" || user.contains (":") || token == "")
-                    throw new Failure.INVALID ("Enter a name, username and app token.");
-                var item = new Book (Uuid.string_random (), label.strip (), Dav.book_url (url), user.strip ());
-                yield store.add (item, token);
-                book_names.append (item.label);
-                book_menu.selected = (uint) (store.books.length - 1);
-                if (book != item) select_book ();
-                status.label = "Address book saved. Refresh to connect.";
+                string user = username.strip ();
+                if (user == "" || user.contains (":") || token == "")
+                    throw new Failure.INVALID ("Enter a username and app token.");
+                var account = new Book ("", "", Dav.book_url (url), user);
+                var found = yield dav.discover (account, token);
+                var dialog = new Adw.MessageDialog (this, "Choose an Address Book", null);
+                var names = new Gtk.StringList (null);
+                foreach (Book result in found) names.append (result.label + " · " + result.url);
+                var choices = new Gtk.DropDown (names, null);
+                dialog.extra_child = choices;
+                dialog.add_response ("cancel", "Cancel");
+                dialog.add_response ("add", "Add");
+                dialog.default_response = "add";
+                dialog.set_response_appearance ("add", Adw.ResponseAppearance.SUGGESTED);
+                dialog.response.connect ((answer) => {
+                    uint index = choices.selected;
+                    if (answer == "add" && index < (uint) found.length) {
+                        var item = found[index];
+                        save_address_book.begin (null, item.label, item.url, item.user, token);
+                    }
+                });
+                dialog.present ();
             } catch (Error error) { notice (error.message); }
+            busy = false;
+            update_controls ();
+        }
+
+        private void refresh_books (Book? preferred) {
+            var names = new Gtk.StringList (null);
+            uint selection = 0;
+            for (uint i = 0; i < (uint) store.books.length; i++) {
+                var item = store.books[i];
+                names.append (item.label);
+                if (item == preferred) selection = i;
+            }
+            book_names = names;
+            book_menu.model = book_names;
+            book_menu.selected = selection;
+            select_book ();
+        }
+
+        private async void save_address_book (Book? previous, string label, string url,
+            string username, string token) {
+            if (busy) return;
+            busy = true;
+            update_controls ();
+            Book? item = null;
+            try {
+                string user = username.strip ();
+                if (label.strip () == "" || user == "" || user.contains (":"))
+                    throw new Failure.INVALID ("Enter an address book name and username.");
+                string endpoint = Dav.book_url (url);
+                bool same_account = previous != null && previous.url == endpoint && previous.user == user;
+                if (!same_account && token == "")
+                    throw new Failure.INVALID ("Enter the app token for this address book URL and username.");
+                string id = same_account && token == "" && previous != null
+                    ? previous.id : Uuid.string_random ();
+                item = new Book (id, label.strip (), endpoint, user);
+                yield store.save_book (item, previous, token == "" ? null : token);
+                refresh_books (item);
+                notice ("Address book saved.");
+            } catch (Error error) {
+                bool saved = item != null && store.books.find (item);
+                if (saved) refresh_books (item);
+                notice (saved ? "Address book saved. Local cleanup failed: " + error.message : error.message);
+            }
+            busy = false;
+            update_controls ();
+        }
+
+        private void remove_book_dialog () {
+            var item = book;
+            if (busy || item == null) return;
+            var dialog = new Adw.MessageDialog (this, "Remove Address Book?",
+                "This removes the saved account, token and cached contacts from this app. The contacts on the server stay available.");
+            dialog.add_response ("cancel", "Cancel");
+            dialog.add_response ("remove", "Remove");
+            dialog.set_response_appearance ("remove", Adw.ResponseAppearance.DESTRUCTIVE);
+            dialog.response.connect ((answer) => {
+                if (answer == "remove") remove_address_book.begin (item);
+            });
+            dialog.present ();
+        }
+
+        private async void remove_address_book (Book item) {
+            if (busy) return;
+            busy = true;
+            update_controls ();
+            try {
+                yield store.remove_book (item);
+                notice ("Address book removed.");
+            } catch (Error error) {
+                bool removed = !store.books.find (item);
+                notice (removed ? "Address book removed. Local cleanup failed: " + error.message : error.message);
+            }
+            refresh_books (item);
             busy = false;
             update_controls ();
         }
@@ -523,7 +639,7 @@ namespace Contacts {
 
     int main (string[] args) {
         if (args.length == 2 && args[1] == "--version") {
-            stdout.printf ("Standalone Contacts 0.1.0\n");
+            stdout.printf ("Standalone Contacts 0.2.0\n");
             return 0;
         }
         bool smoke = args.length == 2 && args[1] == "--smoke-test";

@@ -39,6 +39,7 @@ namespace Contacts {
             if (!FileUtils.test (file, FileTest.EXISTS)) return;
             config.load_from_file (file, KeyFileFlags.NONE);
             foreach (string id in config.get_groups ()) {
+                if (id == "settings") continue;
                 if (!Uuid.string_is_valid (id))
                     throw new Failure.STORAGE ("Invalid address book identifier.");
                 books.add (new Book (id, config.get_string (id, "label"),
@@ -52,21 +53,53 @@ namespace Contacts {
             return values;
         }
 
-        public async void add (Book book, string token) throws Error {
-            if (!(yield Secret.password_storev (token_schema, attributes (book),
-                Secret.COLLECTION_DEFAULT, "Contacts · " + book.label, token, null)))
-                throw new Failure.STORAGE ("The system keyring could not store the token.");
-            var config = new KeyFile ();
-            foreach (Book current in books) write_book (config, current);
-            write_book (config, book);
+        public async void save_book (Book item, Book? previous, string? new_token) throws Error {
+            bool new_id = previous == null || item.id != previous.id;
+            if (new_id) {
+                if (new_token == null || !(yield Secret.password_storev (token_schema, attributes (item),
+                    Secret.COLLECTION_DEFAULT, "Contacts · " + item.label, new_token, null)))
+                    throw new Failure.STORAGE ("The system keyring could not store the token.");
+            }
             try {
+                if (previous != null && new_id && previous.url == item.url && previous.user == item.user)
+                    save (item, load (previous));
+                var config = new KeyFile ();
+                foreach (Book current in books)
+                    write_book (config, current == previous ? item : current);
+                if (previous == null) write_book (config, item);
                 write ("books.ini", config);
             } catch (Error error) {
-                try { yield Secret.password_clearv (token_schema, attributes (book), null); }
-                catch (Error ignored) {}
+                if (new_id) {
+                    try { yield clear_local (item); }
+                    catch (Error ignored) {}
+                }
                 throw error;
             }
-            books.add (book);
+            uint index;
+            if (previous != null && books.find (previous, out index)) books.set (index, item);
+            else books.add (item);
+            if (previous != null && new_id) yield clear_local (previous);
+        }
+
+        public async void remove_book (Book item) throws Error {
+            var config = new KeyFile ();
+            config.set_boolean ("settings", "configured", true);
+            foreach (Book current in books) {
+                if (current != item) write_book (config, current);
+            }
+            write ("books.ini", config);
+            books.remove (item);
+            yield clear_local (item);
+        }
+
+        private async void clear_local (Book book) throws Error {
+            var file = File.new_for_path (Path.build_filename (root, book.id + ".ini"));
+            Error? cache_error = null;
+            try { file.delete (); }
+            catch (IOError.NOT_FOUND ignored) {}
+            catch (Error error) { cache_error = error; }
+            yield Secret.password_clearv (token_schema, attributes (book), null);
+            if (cache_error != null) throw cache_error;
         }
 
         private void write_book (KeyFile config, Book book) {
@@ -115,6 +148,9 @@ namespace Contacts {
     class DavEntry : Object {
         public string href = "";
         public string etag = "";
+        public string display_name = "";
+        public string principal = "";
+        public GenericArray<string> homes = new GenericArray<string> ();
         public string status = "";
         public bool addressbook;
         public bool collection;
@@ -127,6 +163,9 @@ namespace Contacts {
         private DavEntry? current;
         private string prop_status = "";
         private string prop_etag = "";
+        private string prop_display = "";
+        private string prop_principal = "";
+        private GenericArray<string> prop_homes = new GenericArray<string> ();
         private bool prop_addressbook;
         private bool prop_collection;
         private StringBuilder value = new StringBuilder ();
@@ -164,6 +203,9 @@ namespace Contacts {
             if (tag == "propstat" && self.parent () == "response") {
                 self.prop_status = "";
                 self.prop_etag = "";
+                self.prop_display = "";
+                self.prop_principal = "";
+                self.prop_homes = new GenericArray<string> ();
                 self.prop_collection = false;
                 self.prop_addressbook = false;
             }
@@ -189,9 +231,16 @@ namespace Contacts {
                 if (tag == "status" && parent == "response") current.status = value;
                 if (tag == "status" && parent == "propstat") self.prop_status = value;
                 if (tag == "getetag" && parent == "prop") self.prop_etag = value;
+                if (tag == "displayname" && parent == "prop") self.prop_display = value;
+                if (tag == "href" && parent == "current-user-principal") self.prop_principal = value;
+                if (tag == "href" && parent == "addressbook-home-set" && value != "")
+                    self.prop_homes.add (value);
                 if (tag == "propstat" && parent == "response" && ok (self.prop_status)) {
                     current.property_ok = true;
                     if (self.prop_etag != "") current.etag = self.prop_etag;
+                    if (self.prop_display != "") current.display_name = self.prop_display;
+                    if (self.prop_principal != "") current.principal = self.prop_principal;
+                    foreach (string href in self.prop_homes) current.homes.add (href);
                     current.collection |= self.prop_collection;
                     current.addressbook |= self.prop_addressbook;
                 }
@@ -213,7 +262,7 @@ namespace Contacts {
 
         public Dav () {
             session.timeout = 30;
-            session.user_agent = "StandaloneContacts/0.1";
+            session.user_agent = "StandaloneContacts/0.2";
         }
 
         public static string book_url (string text) throws Error {
@@ -227,6 +276,111 @@ namespace Contacts {
                 throw new Failure.INVALID ("Enter an HTTPS address book URL, with a trailing slash.");
             string url = uri.to_string ();
             return url.has_suffix ("/") ? url : url + "/";
+        }
+
+        private const string DISCOVERY_QUERY = """<?xml version="1.0" encoding="UTF-8"?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+<D:prop><D:resourcetype/><D:displayname/><D:current-user-principal/><C:addressbook-home-set/></D:prop>
+</D:propfind>""";
+
+        private string discovery_url (string base_url, string href) throws Error {
+            Uri origin = Uri.parse (base_url, URI_FLAGS);
+            Uri target = Uri.parse_relative (origin, href, URI_FLAGS);
+            if (href == "" || target.get_host () == null || target.get_scheme () != origin.get_scheme () ||
+                target.get_host ().ascii_down () != origin.get_host ().ascii_down () ||
+                target.get_port () != origin.get_port () || target.get_userinfo () != null ||
+                target.get_query () != null || target.get_fragment () != null)
+                throw new Failure.INVALID ("CardDAV discovery returned a URL outside the configured server.");
+            return target.to_string ();
+        }
+
+        private async DavListing probe (Book account, string token, string depth,
+            string initial_url, out string final_url) throws Error {
+            string url = discovery_url (account.url, initial_url);
+            for (int hop = 0; hop < 6; hop++) {
+                var msg = authenticated_message (account, token, "PROPFIND", url);
+                msg.get_request_headers ().replace ("Depth", depth);
+                msg.set_request_body_from_bytes ("application/xml; charset=utf-8",
+                    new Bytes (DISCOVERY_QUERY.data));
+                Bytes bytes = yield session.send_and_read_async (msg, Priority.DEFAULT, null);
+                uint status = (uint) msg.get_status ();
+                if (status == 207) {
+                    final_url = url;
+                    return new DavListing (decode (bytes));
+                }
+                if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+                    string? location = msg.get_response_headers ().get_one ("Location");
+                    if (location != null) {
+                        url = discovery_url (url, location);
+                        continue;
+                    }
+                }
+                if (status == 404 || status == 405 || status == 501)
+                    throw new Failure.INVALID ("CardDAV discovery endpoint is unavailable (HTTP %u).".printf (status));
+                throw new Failure.HTTP ("CardDAV discovery failed (HTTP %u).".printf (status));
+            }
+            throw new Failure.HTTP ("Too many CardDAV discovery redirects.");
+        }
+
+        public async GenericArray<Book> discover (Book account, string token) throws Error {
+            string url = account.url;
+            string final_url;
+            DavListing start;
+            if (Uri.parse (url, URI_FLAGS).get_path () == "/") {
+                try {
+                    start = yield probe (account, token, "0", "/.well-known/carddav", out final_url);
+                } catch (Failure.INVALID missing) {
+                    try {
+                        start = yield probe (account, token, "0", url, out final_url);
+                    } catch (Failure.INVALID missing_root) {
+                        start = yield probe (account, token, "0", "/carddav/", out final_url);
+                    }
+                }
+            } else {
+                start = yield probe (account, token, "0", url, out final_url);
+            }
+
+            var found = new GenericArray<Book> ();
+            collect_books (found, account, start, final_url);
+            if (found.length > 0) return found;
+
+            var homes = new HashTable<string, bool> (str_hash, str_equal);
+            string principal = "";
+            foreach (DavEntry entry in start.entries) {
+                foreach (string href in entry.homes)
+                    homes.insert (discovery_url (final_url, href), true);
+                if (entry.principal != "") principal = discovery_url (final_url, entry.principal);
+            }
+            if (homes.size () == 0 && principal != "" && principal != final_url) {
+                var properties = yield probe (account, token, "0", principal, out final_url);
+                foreach (DavEntry entry in properties.entries) {
+                    foreach (string href in entry.homes)
+                        homes.insert (discovery_url (final_url, href), true);
+                }
+            }
+            if (homes.size () == 0) homes.insert (final_url, true);
+            foreach (string home in homes.get_keys ()) {
+                var list = yield probe (account, token, "1", home, out final_url);
+                collect_books (found, account, list, final_url);
+            }
+            if (found.length == 0)
+                throw new Failure.INVALID ("No CardDAV address books were found at this server.");
+            return found;
+        }
+
+        private void collect_books (GenericArray<Book> books, Book account, DavListing listing,
+            string base_url) throws Error {
+            var seen = new HashTable<string, bool> (str_hash, str_equal);
+            foreach (Book book in books) seen.insert (book.url, true);
+            foreach (DavEntry entry in listing.entries) {
+                if (!entry.addressbook || !entry.collection || !entry.property_ok ||
+                    (entry.status != "" && !DavListing.ok (entry.status))) continue;
+                string url = book_url (discovery_url (base_url, entry.href));
+                if (seen.contains (url)) continue;
+                seen.insert (url, true);
+                string label = entry.display_name != "" ? entry.display_name : "Address Book";
+                books.add (new Book (Uuid.string_random (), label, url, account.user));
+            }
         }
 
         private static bool strong (string etag) {
@@ -254,14 +408,20 @@ namespace Contacts {
             return uri.to_string ();
         }
 
-        private async Bytes request (Book book, string token, string method, string url,
-            string? body, string? condition, out Soup.Message response) throws Error {
+        private Soup.Message authenticated_message (Book book, string token, string method, string url)
+            throws Error {
             var msg = new Soup.Message (method, url);
             if (msg == null) throw new Failure.INVALID ("Invalid CardDAV URL.");
             msg.add_flags (Soup.MessageFlags.NO_REDIRECT);
             string auth = book.user + ":" + token;
+            msg.get_request_headers ().replace ("Authorization", "Basic " + Base64.encode (auth.data));
+            return msg;
+        }
+
+        private async Bytes request (Book book, string token, string method, string url,
+            string? body, string? condition, out Soup.Message response) throws Error {
+            var msg = authenticated_message (book, token, method, url);
             var headers = msg.get_request_headers ();
-            headers.replace ("Authorization", "Basic " + Base64.encode (auth.data));
             if (method == "PROPFIND") headers.replace ("Depth", "1");
             if (condition != null) {
                 if (condition != "*" && !strong (condition))

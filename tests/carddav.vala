@@ -28,6 +28,13 @@ class Fixture : Object {
         var url = Dav.book_url (uris.data.to_string () + "book/");
         var book = new Book (Uuid.string_random (), "Test", url, "test");
         var client = new Dav ();
+        var account = new Book ("", "", uris.data.to_string (), "test");
+        var found = yield client.discover (account, TOKEN);
+        assert (found.length == 1 && found[0].url == url && found[0].label == "Personal");
+        if (found.length == 1) {
+            var direct = yield client.discover (found[0], TOKEN);
+            assert (direct.length == 1 && direct[0].url == url);
+        }
         var cache = yield client.pull (book, TOKEN, new GenericArray<Contact> ());
         assert (cache.length == 1 && cache[0].card.raw == CARD && cache[0].etag == ETAG);
         assert (gets == 1);
@@ -64,6 +71,7 @@ class Fixture : Object {
         assert (headers.get_one ("Authorization") == "Basic dGVzdDphcHAtdG9rZW4=");
         switch (msg.get_method ()) {
             case "PROPFIND":
+                if (serve_discovery (msg, path, headers.get_one ("Depth") ?? "")) break;
                 assert (path == "/book/" && headers.get_one ("Depth") == "1");
                 reply (msg, 207, "application/xml", LIST);
                 break;
@@ -95,6 +103,41 @@ class Fixture : Object {
             default:
                 assert_not_reached ();
         }
+    }
+
+    private bool serve_discovery (Soup.ServerMessage msg, string path, string depth) {
+        string prop;
+        switch (path) {
+            case "/.well-known/carddav":
+                assert (depth == "0");
+                msg.set_redirect (301, "/carddav/");
+                return true;
+            case "/carddav/":
+                assert (depth == "0");
+                prop = "<D:current-user-principal><D:href>/account/</D:href></D:current-user-principal>";
+                break;
+            case "/account/":
+                assert (depth == "0");
+                prop = "<C:addressbook-home-set><D:href>/home/</D:href></C:addressbook-home-set>";
+                break;
+            case "/home/":
+                assert (depth == "1");
+                path = "/book/";
+                prop = "<D:resourcetype><D:collection/><C:addressbook/></D:resourcetype>"
+                    + "<D:displayname>Personal</D:displayname>";
+                break;
+            case "/book/":
+                if (depth != "0") return false;
+                prop = "<D:resourcetype><D:collection/><C:addressbook/></D:resourcetype>";
+                break;
+            default:
+                return false;
+        }
+        string xml = "<D:multistatus xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:carddav\">"
+            + "<D:response><D:href>" + path + "</D:href><D:propstat><D:prop>" + prop
+            + "</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>";
+        reply (msg, 207, "application/xml", xml);
+        return true;
     }
 
     private void reply (Soup.ServerMessage msg, uint status, string type, string body) {
