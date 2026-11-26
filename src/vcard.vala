@@ -45,8 +45,11 @@ namespace Contacts {
             for (int i = 0; i < lines.length; i++) {
                 var line = logical_line (lines, ref i);
                 int colon = separator (line);
-                if (property_name (line, colon) == key)
-                    return unescape (line.substring (colon + 1));
+                if (property_name (line, colon) == key) {
+                    string value = line.substring (colon + 1);
+                    int units = key == "ORG" ? organisation_separator (value) : -1;
+                    return unescape (units >= 0 ? value.substring (0, units) : value);
+                }
             }
             return "";
         }
@@ -85,29 +88,59 @@ namespace Contacts {
             return result.str;
         }
 
-        public VCard rename (string name) throws Failure {
-            if (name == this.name) return this;
+        private static int organisation_separator (string value) {
+            for (int i = 0; i < value.length; i++) {
+                if (value[i] == '\\') i++;
+                else if (value[i] == ';') return i;
+            }
+            return -1;
+        }
+
+        public VCard edit (string name, string email, string phone, string organisation,
+            string notes) throws Failure {
+            if (name.strip () == "")
+                throw new Failure.INVALID ("Enter a contact name.");
+            return update_field ("FN", name).update_field ("EMAIL", email)
+                .update_field ("TEL", phone).update_field ("ORG", organisation)
+                .update_field ("NOTE", notes);
+        }
+
+        private VCard update_field (string field, string text) throws Failure {
+            if (text == read (field)) return this;
             string[] lines = raw.split ("\n");
             for (int i = 0; i < lines.length; i++) {
                 int first = i;
                 string line = logical_line (lines, ref i);
                 int colon = separator (line);
                 string key = property_name (line, colon);
-                if (key != "FN" && key != "END") continue;
+                bool insert = key == "END" && line.substring (colon + 1).up () == "VCARD";
+                if (key != field && !insert) continue;
+
+                string prefix = insert ? field + ":" : line.substring (0, colon + 1);
+                string params = prefix.up ();
+                if (params.contains ("ENCODING=") || params.contains ("CHARSET="))
+                    throw new Failure.INVALID ("The %s field uses a legacy vCard encoding.".printf (field));
+                string previous = insert ? "" : line.substring (colon + 1);
+                string value = escape (text);
+                if (field == "TEL" && text != "" &&
+                    (previous.ascii_down ().has_prefix ("tel:") || params.contains ("VALUE=URI"))) {
+                    string uri = text;
+                    if (!uri.contains (":") && previous.ascii_down ().has_prefix ("tel:"))
+                        uri = "tel:" + uri;
+                    try { Uri.parse (uri, UriFlags.NONE); }
+                    catch (UriError error) {
+                        throw new Failure.INVALID ("Use a valid phone URI for this contact, such as tel:+441234567890.");
+                    }
+                    value = uri;
+                }
+                int units = field == "ORG" ? organisation_separator (previous) : -1;
+                if (units >= 0) value += previous.substring (units);
+
+                string newline = lines[first].has_suffix ("\r") ? "\r\n" : "\n";
                 var result = new StringBuilder ();
                 for (int j = 0; j < first; j++) result.append (lines[j] + "\n");
-                string newline = lines[first].has_suffix ("\r") ? "\r\n" : "\n";
-                string prefix = key == "FN" ? line.substring (0, colon + 1) : "FN:";
-                if (prefix.up ().contains ("ENCODING=") || prefix.up ().contains ("CHARSET="))
-                    throw new Failure.INVALID ("This display name uses a legacy vCard encoding.");
-                result.append (fold (prefix + escape (name), newline));
-                if (key == "END") {
-                    result.append (newline);
-                    i = first - 1;
-                } else if (i + 1 < lines.length) {
-                    result.append (newline);
-                }
-                for (int j = i + 1; j < lines.length; j++) {
+                if (value != "") result.append (fold (prefix + value, newline) + newline);
+                for (int j = insert ? first : i + 1; j < lines.length; j++) {
                     result.append (lines[j]);
                     if (j + 1 < lines.length) result.append_c ('\n');
                 }

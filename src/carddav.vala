@@ -262,7 +262,7 @@ namespace Contacts {
 
         public Dav () {
             session.timeout = 30;
-            session.user_agent = "StandaloneContacts/0.2";
+            session.user_agent = "StandaloneContacts/0.3.1";
         }
 
         public static string book_url (string text) throws Error {

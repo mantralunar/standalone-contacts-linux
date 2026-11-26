@@ -1,4 +1,4 @@
-project('standalone-contacts', ['vala', 'c'], version: '0.2.0', meson_version: '>=0.60')
+project('standalone-contacts', ['vala', 'c'], version: '0.3.1', meson_version: '>=0.60')
 add_project_arguments('--target-glib=2.66', language: 'vala')
 deps = [
   dependency('gtk4', version: '>=4.10'),

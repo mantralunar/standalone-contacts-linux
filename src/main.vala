@@ -6,6 +6,7 @@ namespace Contacts {
         private Book? book;
         private Contact? selected;
         private bool busy;
+        private bool editing;
         private Gtk.StringList book_names = new Gtk.StringList (null);
         private Gtk.DropDown book_menu;
         private Gtk.SearchEntry search = new Gtk.SearchEntry ();
@@ -19,6 +20,8 @@ namespace Contacts {
         private Gtk.Button create;
         private Gtk.Button import;
         private Gtk.Button export;
+        private Gtk.PopoverMenu? contact_menu;
+        private ulong contact_menu_closed;
         private Adw.ToastOverlay overlay = new Adw.ToastOverlay ();
 
         public Window (Gtk.Application app, Store store) {
@@ -114,14 +117,26 @@ namespace Contacts {
             edit_book.clicked.connect (() => book_dialog (book));
             remove_book.clicked.connect (remove_book_dialog);
             refresh.clicked.connect (() => refresh_current.begin ());
-            create.clicked.connect (() => name_dialog (null));
+            create.clicked.connect (() => {
+                list.unselect_all ();
+                start_editing ();
+            });
             import.clicked.connect (() => import_file.begin ());
             export.clicked.connect (() => export_file.begin ());
-            search.search_changed.connect (() => list.invalidate_filter ());
+            search.search_changed.connect (() => {
+                close_contact_menu ();
+                list.invalidate_filter ();
+            });
             list.row_selected.connect ((row) => {
+                if (editing) return;
                 var contact_row = row as ContactRow;
                 selected = contact_row != null ? contact_row.contact : null;
                 show_details ();
+            });
+            add_contact_menu_controls ();
+            close_request.connect (() => {
+                close_contact_menu ();
+                return false;
             });
             select_book ();
         }
@@ -138,14 +153,17 @@ namespace Contacts {
         }
 
         private void update_controls () {
-            add_book.sensitive = !busy;
-            edit_book.sensitive = !busy && book != null;
-            remove_book.sensitive = !busy && book != null;
-            book_menu.sensitive = !busy && store.books.length > 0;
-            refresh.sensitive = !busy && book != null;
-            create.sensitive = !busy && book != null;
-            import.sensitive = !busy && book != null;
-            export.sensitive = !busy && contacts.length > 0;
+            bool browsing = !busy && !editing;
+            add_book.sensitive = browsing;
+            edit_book.sensitive = browsing && book != null;
+            remove_book.sensitive = browsing && book != null;
+            book_menu.sensitive = browsing && store.books.length > 0;
+            refresh.sensitive = browsing && book != null;
+            create.sensitive = browsing && book != null;
+            import.sensitive = browsing && book != null;
+            export.sensitive = browsing && contacts.length > 0;
+            list.sensitive = !editing;
+            search.sensitive = !editing;
             details.sensitive = !busy;
         }
 
@@ -166,6 +184,7 @@ namespace Contacts {
         }
 
         private void render (string? keep = null) {
+            close_contact_menu ();
             Gtk.Widget? child;
             while ((child = list.get_first_child ()) != null) list.remove (child);
             contacts.sort ((a, b) => a.card.name.casefold ().collate (b.card.name.casefold ()));
@@ -185,6 +204,10 @@ namespace Contacts {
             Gtk.Widget? child;
             while ((child = details.get_first_child ()) != null) details.remove (child);
             var contact = selected;
+            if (editing) {
+                show_editor (contact);
+                return;
+            }
             if (contact == null) {
                 var page = new Adw.StatusPage ();
                 page.icon_name = "avatar-default-symbolic";
@@ -194,13 +217,7 @@ namespace Contacts {
                 return;
             }
             string name = contact.card.name;
-            var avatar = new Adw.Avatar (96, name, true);
-            var photo = contact.card.photo ();
-            if (photo != null) {
-                try { avatar.custom_image = Gdk.Texture.from_bytes (photo); }
-                catch (Error ignored) {}
-            }
-            details.append (avatar);
+            details.append (contact_avatar (contact, 96));
             var title = new Gtk.Label (name == "" ? "Unnamed contact" : name);
             title.wrap = true;
             title.selectable = true;
@@ -212,19 +229,80 @@ namespace Contacts {
             add_field (group, "Organisation", contact.card.read ("ORG"));
             add_field (group, "Notes", contact.card.read ("NOTE"));
             details.append (group);
-            var actions = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
-            actions.halign = Gtk.Align.CENTER;
-            var edit = new Gtk.Button.with_label ("Edit vCard");
-            edit.clicked.connect (() => edit_dialog (contact));
-            actions.append (edit);
-            var save = new Gtk.Button.with_label ("Export Contact");
-            save.clicked.connect (() => export_file.begin (contact));
-            actions.append (save);
-            var remove = new Gtk.Button.with_label ("Delete");
-            remove.add_css_class ("destructive-action");
-            remove.clicked.connect (() => delete_dialog (contact));
-            actions.append (remove);
-            details.append (actions);
+            var edit = new Gtk.Button.with_label ("Edit");
+            edit.halign = Gtk.Align.CENTER;
+            edit.clicked.connect (start_editing);
+            details.append (edit);
+        }
+
+        private void add_contact_menu_controls () {
+            var click = new Gtk.GestureClick ();
+            click.button = Gdk.BUTTON_SECONDARY;
+            click.pressed.connect ((count, x, y) => {
+                if (count != 1 || busy || editing) return;
+                var row = list.get_row_at_y ((int) y) as ContactRow;
+                if (row == null) return;
+                Graphene.Point point = { (float) x, (float) y };
+                Graphene.Point anchor;
+                if (list.compute_point (row, point, out anchor))
+                    show_contact_menu (row, (int) anchor.x, (int) anchor.y);
+            });
+            list.add_controller (click);
+
+            var keys = new Gtk.EventControllerKey ();
+            keys.key_pressed.connect ((key, code, modifiers) => {
+                if (busy || editing ||
+                    (key != Gdk.Key.Menu && !(key == Gdk.Key.F10 &&
+                        (modifiers & Gdk.ModifierType.SHIFT_MASK) != 0))) return false;
+                var row = (list.get_focus_child () as ContactRow)
+                    ?? (list.get_selected_row () as ContactRow);
+                if (row == null) return false;
+                show_contact_menu (row, row.get_width () / 2, row.get_height () / 2);
+                return true;
+            });
+            list.add_controller (keys);
+        }
+
+        private void show_contact_menu (ContactRow row, int x, int y) {
+            close_contact_menu ();
+            list.select_row (row);
+            var contact = row.contact;
+            var model = new Menu ();
+            model.append ("Export Contact…", "contact.export");
+            model.append ("Delete…", "contact.delete");
+
+            var actions = new SimpleActionGroup ();
+            var export_action = new SimpleAction ("export", null);
+            export_action.activate.connect (() => {
+                close_contact_menu ();
+                export_file.begin (contact);
+            });
+            actions.add_action (export_action);
+            var delete_action = new SimpleAction ("delete", null);
+            delete_action.activate.connect (() => {
+                close_contact_menu ();
+                delete_dialog (contact);
+            });
+            actions.add_action (delete_action);
+
+            var menu = new Gtk.PopoverMenu.from_model (model);
+            menu.insert_action_group ("contact", actions);
+            menu.set_parent (row);
+            Gdk.Rectangle location = { x, y, 1, 1 };
+            menu.set_pointing_to (location);
+            menu.has_arrow = false;
+            contact_menu = menu;
+            contact_menu_closed = menu.closed.connect (close_contact_menu);
+            menu.popup ();
+        }
+
+        private void close_contact_menu () {
+            var menu = contact_menu;
+            if (menu == null) return;
+            contact_menu = null;
+            SignalHandler.disconnect (menu, contact_menu_closed);
+            menu.popdown ();
+            menu.unparent ();
         }
 
         private void add_field (Adw.PreferencesGroup group, string title, string text) {
@@ -423,59 +501,69 @@ namespace Contacts {
             update_controls ();
         }
 
-        private void name_dialog (Contact? contact) {
-            var dialog = new Adw.MessageDialog (this,
-                contact == null ? "New Contact" : "Display Name", null);
-            var box = form ();
-            var name = input (box, "Name");
-            if (contact != null) name.text = contact.card.name;
-            dialog.extra_child = box;
-            dialog.add_response ("cancel", "Cancel");
-            dialog.add_response ("save", "Save");
-            dialog.default_response = "save";
-            dialog.response.connect ((answer) => {
-                if (answer != "save") return;
-                try {
-                    if (name.text.strip () == "") throw new Failure.INVALID ("Enter a display name.");
-                    save_card.begin (contact, contact != null
-                        ? contact.card.rename (name.text) : VCard.create (name.text, Uuid.string_random ()));
-                } catch (Error error) { notice (error.message); }
-            });
-            dialog.present ();
+        private void start_editing () {
+            close_contact_menu ();
+            editing = true;
+            show_details ();
+            update_controls ();
         }
 
-        private void edit_dialog (Contact contact) {
-            var dialog = new Adw.MessageDialog (this, "Edit vCard",
-                "Edit the original vCard fields. Keep the UID and card markers.");
-            var box = form ();
-            var name_button = new Gtk.Button.with_label ("Edit Display Name Only");
-            name_button.clicked.connect (() => {
-                dialog.close ();
-                name_dialog (contact);
-            });
-            box.append (name_button);
-            var view = new Gtk.TextView ();
-            view.monospace = true;
-            view.buffer.text = contact.card.raw;
+        private Adw.EntryRow editor_field (Adw.PreferencesGroup group, string title, string value) {
+            var field = new Adw.EntryRow ();
+            field.title = title;
+            field.text = value;
+            group.add (field);
+            return field;
+        }
+
+        private void show_editor (Contact? contact) {
+            var card = contact != null ? contact.card : null;
+            if (contact != null) details.append (contact_avatar (contact, 96));
+            var group = new Adw.PreferencesGroup ();
+            var name = editor_field (group, "Name", card != null ? card.name : "");
+            var email = editor_field (group, "Email", card != null ? card.read ("EMAIL") : "");
+            var phone = editor_field (group, "Phone", card != null ? card.read ("TEL") : "");
+            var org = editor_field (group, "Organisation", card != null ? card.read ("ORG") : "");
+            details.append (group);
+
+            var notes_label = new Gtk.Label ("Notes");
+            notes_label.xalign = 0;
+            notes_label.add_css_class ("heading");
+            details.append (notes_label);
+            var notes = new Gtk.TextView ();
+            notes.wrap_mode = Gtk.WrapMode.WORD_CHAR;
+            notes.update_property (Gtk.AccessibleProperty.LABEL, "Notes", -1);
+            notes.buffer.text = card != null ? card.read ("NOTE") : "";
             var scroll = new Gtk.ScrolledWindow ();
-            scroll.min_content_height = 260;
-            scroll.min_content_width = 360;
-            scroll.child = view;
-            box.append (scroll);
-            dialog.extra_child = box;
-            dialog.add_response ("cancel", "Cancel");
-            dialog.add_response ("save", "Save");
-            dialog.set_response_appearance ("save", Adw.ResponseAppearance.SUGGESTED);
-            dialog.response.connect ((answer) => {
-                if (answer != "save") return;
+            scroll.min_content_height = 100;
+            scroll.has_frame = true;
+            scroll.child = notes;
+            details.append (scroll);
+
+            var actions = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 8);
+            actions.halign = Gtk.Align.END;
+            var cancel = new Gtk.Button.with_label ("Cancel");
+            cancel.clicked.connect (finish_editing);
+            actions.append (cancel);
+            var save = new Gtk.Button.with_label ("Save");
+            save.add_css_class ("suggested-action");
+            save.clicked.connect (() => {
                 try {
-                    var cards = VCard.parse_file (view.buffer.text);
-                    if (cards.length != 1 || cards[0].read ("UID") != contact.card.read ("UID"))
-                        throw new Failure.INVALID ("Keep exactly one vCard with its original UID.");
-                    save_card.begin (contact, cards[0]);
+                    var original = card ?? VCard.create (name.text, Uuid.string_random ());
+                    var updated = original.edit (name.text, email.text, phone.text, org.text,
+                        notes.buffer.text);
+                    save_card.begin (contact, updated);
                 } catch (Error error) { notice (error.message); }
             });
-            dialog.present ();
+            actions.append (save);
+            details.append (actions);
+            name.grab_focus ();
+        }
+
+        private void finish_editing () {
+            editing = false;
+            show_details ();
+            update_controls ();
         }
 
         private void delete_dialog (Contact contact) {
@@ -509,7 +597,10 @@ namespace Contacts {
         private async void save_card (Contact? contact, VCard card) {
             var current = book;
             if (busy || current == null) return;
-            if (contact != null && contact.card.raw == card.raw) return;
+            if (contact != null && contact.card.raw == card.raw) {
+                finish_editing ();
+                return;
+            }
             busy = true;
             update_controls ();
             string url = contact != null ? contact.url : current.url + Uuid.string_random () + ".vcf";
@@ -518,6 +609,7 @@ namespace Contacts {
                 string token = yield store.token (current);
                 yield dav.put (current, token, url, contact != null ? contact.etag : null, card);
                 sent = true;
+                finish_editing ();
                 yield reload (current, token, url);
             } catch (Error error) {
                 notice (sent ? "Saved on server. Refresh failed: " + error.message : error.message);
@@ -586,6 +678,16 @@ namespace Contacts {
         }
     }
 
+    Adw.Avatar contact_avatar (Contact contact, int size) {
+        var avatar = new Adw.Avatar (size, contact.card.name, true);
+        var photo = contact.card.photo ();
+        if (photo != null) {
+            try { avatar.custom_image = Gdk.Texture.from_bytes (photo); }
+            catch (Error ignored) {}
+        }
+        return avatar;
+    }
+
     class ContactRow : Gtk.ListBoxRow {
         public Contact contact;
         public string index_text;
@@ -596,7 +698,7 @@ namespace Contacts {
                 + contact.card.read ("TEL")).casefold ();
             var line = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 10);
             line.margin_top = line.margin_bottom = 4;
-            line.append (new Adw.Avatar (34, name, true));
+            line.append (contact_avatar (contact, 34));
             var label = new Gtk.Label (name == "" ? "Unnamed contact" : name);
             label.ellipsize = Pango.EllipsizeMode.END;
             label.xalign = 0;
@@ -639,7 +741,7 @@ namespace Contacts {
 
     int main (string[] args) {
         if (args.length == 2 && args[1] == "--version") {
-            stdout.printf ("Standalone Contacts 0.2.0\n");
+            stdout.printf ("Standalone Contacts 0.3.1\n");
             return 0;
         }
         bool smoke = args.length == 2 && args[1] == "--smoke-test";
