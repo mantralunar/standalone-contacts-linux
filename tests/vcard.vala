@@ -33,7 +33,8 @@ void test_incomplete () {
     try {
         VCard.parse_file (ORIGINAL + "BEGIN:VCARD\nFN:Truncated");
         assert_not_reached ();
-    } catch (Failure.INVALID expected) {}
+    } catch (Failure.INVALID expected) {
+    } catch (Error error) { assert_not_reached (); }
 }
 
 int main (string[] args) {

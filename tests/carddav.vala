@@ -16,7 +16,7 @@ const string LIST = """<?xml version="1.0"?>
 </D:multistatus>""";
 
 class Fixture : Object {
-    private Soup.Server server = new Soup.Server ();
+    private Soup.Server server = new Soup.Server ("server-header", "Standalone Contacts test", null);
     private uint gets;
     private bool reject_get;
     private bool updated;

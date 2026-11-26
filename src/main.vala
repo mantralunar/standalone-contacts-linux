@@ -105,7 +105,8 @@ namespace Contacts {
             export.clicked.connect (() => export_file.begin ());
             search.search_changed.connect (() => list.invalidate_filter ());
             list.row_selected.connect ((row) => {
-                selected = row is ContactRow ? ((ContactRow) row).contact : null;
+                var contact_row = row as ContactRow;
+                selected = contact_row != null ? contact_row.contact : null;
                 show_details ();
             });
             select_book ();

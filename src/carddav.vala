@@ -255,7 +255,7 @@ namespace Contacts {
         }
 
         private async Bytes request (Book book, string token, string method, string url,
-            out Soup.Message response, string? body = null, string? condition = null) throws Error {
+            string? body, string? condition, out Soup.Message response) throws Error {
             var msg = new Soup.Message (method, url);
             if (msg == null) throw new Failure.INVALID ("Invalid CardDAV URL.");
             msg.add_flags (Soup.MessageFlags.NO_REDIRECT);
@@ -297,7 +297,7 @@ namespace Contacts {
         public async GenericArray<Contact> pull (Book book, string token,
             GenericArray<Contact> cached) throws Error {
             Soup.Message reply;
-            Bytes body = yield request (book, token, "PROPFIND", book.url, out reply, PROP_QUERY);
+            Bytes body = yield request (book, token, "PROPFIND", book.url, PROP_QUERY, null, out reply);
             if (reply.get_status () != 207)
                 throw new Failure.INVALID ("CardDAV did not return a 207 multistatus response.");
             var listing = new DavListing (decode (body));
@@ -324,8 +324,8 @@ namespace Contacts {
                     next.add (old);
                     continue;
                 }
-                Bytes card_body = yield request (book, token, "GET", url, out reply,
-                    null, strong (item.etag) ? item.etag : null);
+                Bytes card_body = yield request (book, token, "GET", url,
+                    null, strong (item.etag) ? item.etag : null, out reply);
                 if (reply.get_status () != 200)
                     throw new Failure.INVALID ("CardDAV did not return a complete contact.");
                 string etag = reply.get_response_headers ().get_one ("ETag") ?? "";
@@ -345,15 +345,15 @@ namespace Contacts {
             Soup.Message reply;
             if (etag != null && !strong (etag))
                 throw new Failure.CONFLICT ("This contact has no strong ETag. Refresh it before editing.");
-            yield request (book, token, "PUT", member_url (book, url), out reply, card.raw, etag ?? "*");
+            yield request (book, token, "PUT", member_url (book, url), card.raw, etag ?? "*", out reply);
         }
 
         public async void remove (Book book, string token, Contact contact) throws Error {
             if (!strong (contact.etag))
                 throw new Failure.CONFLICT ("This contact has no strong ETag. Refresh it before deleting.");
             Soup.Message reply;
-            yield request (book, token, "DELETE", member_url (book, contact.url), out reply,
-                null, contact.etag);
+            yield request (book, token, "DELETE", member_url (book, contact.url),
+                null, contact.etag, out reply);
         }
     }
 }
