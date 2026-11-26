@@ -95,7 +95,7 @@ jobs:
           timeout 90 dbus-run-session -- xvfb-run -a "$image" --smoke-test
           destination="$GITHUB_WORKSPACE/dist"
           mkdir -p "$destination"
-          install -m 0755 "$image" "$destination/Standalone-Contacts-$VERSION-$ARCH.AppImage"
+          install -m 0755 "$image" "$destination/Contacts-$VERSION-$ARCH.AppImage"
           printf 'version=%s\ncommit=%s\n' "$VERSION" "$commit" >> "$GITHUB_OUTPUT"
       - name: Pass AppImage to release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -123,7 +123,7 @@ jobs:
         run: |
           set -eu
           tag="v$VERSION"
-          image="dist/Standalone-Contacts-$VERSION-x86_64.AppImage"
+          image="dist/Contacts-$VERSION-x86_64.AppImage"
           test -s "$image"
 
           # Create the tag for a manual run. Verify the commit before publishing either way.
@@ -147,5 +147,5 @@ jobs:
               fi
           else
               gh release create "$tag" "$image" --verify-tag \
-                --title "Standalone Contacts $tag" --generate-notes
+                --title "Contacts $tag" --generate-notes
           fi
