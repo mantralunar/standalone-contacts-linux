@@ -1,0 +1,117 @@
+name: Anylinux AppImage Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: ghcr.io/pkgforge-dev/archlinux:latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Anylinux tools
+        uses: pkgforge-dev/anylinux-setup-action@ba7321e11074f9e387a0634e653d09b115d576cd
+      - name: Install dependencies
+        run: |
+          pacman -Syu --needed --noconfirm \
+            base-devel meson ninja vala gtk4 libadwaita libsoup3 libsecret \
+            glib-networking ca-certificates adwaita-icon-theme hicolor-icon-theme \
+            xorg-server-xvfb xorg-xauth dbus jq
+      - name: Compile, test and package x86_64
+        run: |
+          set -eu
+          ARCH=$(uname -m)
+          if [ "$ARCH" != x86_64 ]; then
+              echo "This workflow targets x86_64." >&2
+              exit 1
+          fi
+          scratch=$(mktemp -d)
+          trap 'rm -rf -- "$scratch"' EXIT
+          trap 'exit 1' HUP INT TERM
+
+          meson setup "$scratch/build" "$GITHUB_WORKSPACE" --prefix=/usr --buildtype=release
+          meson compile -C "$scratch/build"
+          meson test -C "$scratch/build" --print-errorlogs
+          DESTDIR="$scratch/install" meson install -C "$scratch/build"
+
+          cd "$scratch"
+          VERSION=$(meson introspect --projectinfo "$scratch/build" | jq -er .version)
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+              printf 'Tag %s must match Meson version v%s.\n' "$GITHUB_REF_NAME" "$VERSION" >&2
+              exit 1
+          fi
+          OUTPATH="$scratch/dist"
+          mkdir -p "$OUTPATH"
+          app_id=io.github.StandaloneContacts
+          ICON="$scratch/install/usr/share/icons/hicolor/scalable/apps/$app_id.svg"
+          DESKTOP="$scratch/install/usr/share/applications/$app_id.desktop"
+          DEPLOY_GTK=1
+          GTK_DIR=gtk-4.0
+          GTK_CLASS_FIX=1
+          STARTUPWMCLASS="$app_id"
+          STRACE_BINARY=standalone-contacts
+          STRACE_FLAGS=--smoke-test
+          export ARCH VERSION OUTPATH ICON DESKTOP DEPLOY_GTK GTK_DIR GTK_CLASS_FIX STARTUPWMCLASS
+          export STRACE_BINARY STRACE_FLAGS
+
+          # The TLS provider is loaded by GIO at runtime and is absent from the linker's dependency graph.
+          XDG_DATA_HOME="$scratch/trace-data" GTK_A11Y=none GSK_RENDERER=cairo \
+              dbus-run-session -- xvfb-run -a quick-sharun \
+              "$scratch/install/usr/bin/standalone-contacts" /usr/lib/gio/modules/libgiognutls.so
+          quick-sharun --make-appimage
+          set -- "$OUTPATH"/*.AppImage
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+              echo "Expected exactly one AppImage in $OUTPATH." >&2
+              exit 1
+          fi
+          image=$1
+          APPIMAGE_EXTRACT_AND_RUN=1 "$image" --version
+          export APPIMAGE_EXTRACT_AND_RUN=1 GSK_RENDERER=cairo GTK_A11Y=none
+          export XDG_DATA_HOME="$scratch/test-data"
+          timeout 90 dbus-run-session -- xvfb-run -a "$image" --smoke-test
+          destination="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$destination"
+          install -m 0755 "$image" "$destination/Standalone-Contacts-$VERSION-$ARCH.AppImage"
+      - name: Pass AppImage to release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+          retention-days: 1
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-appimage
+          path: dist
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          image="dist/Standalone-Contacts-$version-x86_64.AppImage"
+          test -s "$image"
+          if gh release view "$GITHUB_REF_NAME" --json assets \
+              --jq '.assets[].name' > release-assets.txt; then
+              if ! grep -Fxq "$(basename "$image")" release-assets.txt; then
+                  gh release upload "$GITHUB_REF_NAME" "$image"
+              fi
+              gh release edit "$GITHUB_REF_NAME" --draft=false
+          else
+              gh release create "$GITHUB_REF_NAME" "$image" --verify-tag \
+                --title "Standalone Contacts $GITHUB_REF_NAME" --generate-notes
+          fi
