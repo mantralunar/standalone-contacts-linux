@@ -75,7 +75,7 @@ namespace Contacts {
                 }
                 throw error;
             }
-            uint index;
+            uint index = 0;
             if (previous != null && books.find (previous, out index)) books.set (index, item);
             else books.add (item);
             if (previous != null && new_id) yield clear_local (previous);
