@@ -68,7 +68,9 @@ namespace Contacts {
             search.placeholder_text = "Search contacts";
             search.margin_start = search.margin_end = 10;
             sidebar.append (search);
-            list.selection_mode = Gtk.SelectionMode.SINGLE;
+            list.selection_mode = Gtk.SelectionMode.MULTIPLE;
+            // GTK's single-click activation bypasses the modifier-aware selection path.
+            list.activate_on_single_click = false;
             list.add_css_class ("navigation-sidebar");
             list.set_filter_func ((row) => {
                 var contact_row = row as ContactRow;
@@ -125,14 +127,10 @@ namespace Contacts {
             export.clicked.connect (() => export_file.begin ());
             search.search_changed.connect (() => {
                 close_contact_menu ();
+                list.unselect_all ();
                 list.invalidate_filter ();
             });
-            list.row_selected.connect ((row) => {
-                if (editing) return;
-                var contact_row = row as ContactRow;
-                selected = contact_row != null ? contact_row.contact : null;
-                show_details ();
-            });
+            list.selected_rows_changed.connect (update_selection);
             add_contact_menu_controls ();
             close_request.connect (() => {
                 close_contact_menu ();
@@ -183,6 +181,23 @@ namespace Contacts {
             render ();
         }
 
+        private GenericArray<Contact> selected_contacts () {
+            var selection = new GenericArray<Contact> ();
+            foreach (Gtk.ListBoxRow row in list.get_selected_rows ()) {
+                var contact_row = row as ContactRow;
+                if (contact_row != null && row.get_child_visible ())
+                    selection.add (contact_row.contact);
+            }
+            return selection;
+        }
+
+        private void update_selection () {
+            if (editing) return;
+            var selection = selected_contacts ();
+            selected = selection.length == 1 ? selection[0] : null;
+            show_details (selection.length);
+        }
+
         private void render (string? keep = null) {
             close_contact_menu ();
             Gtk.Widget? child;
@@ -194,13 +209,12 @@ namespace Contacts {
                 list.append (row);
                 if (contact.url == keep) keep_row = row;
             }
-            selected = null;
             if (keep_row != null) list.select_row (keep_row);
-            show_details ();
+            update_selection ();
             update_controls ();
         }
 
-        private void show_details () {
+        private void show_details (int selection_count = 0) {
             Gtk.Widget? child;
             while ((child = details.get_first_child ()) != null) details.remove (child);
             var contact = selected;
@@ -211,7 +225,8 @@ namespace Contacts {
             if (contact == null) {
                 var page = new Adw.StatusPage ();
                 page.icon_name = "avatar-default-symbolic";
-                page.title = book == null ? "No Address Book" : "Select a Contact";
+                page.title = selection_count > 1 ? "%d contacts selected".printf (selection_count)
+                    : (book == null ? "No Address Book" : "Select a Contact");
                 page.description = book == null ? "Add your CardDAV address book to see your contacts." : null;
                 details.append (page);
                 return;
@@ -254,8 +269,7 @@ namespace Contacts {
                 if (busy || editing ||
                     (key != Gdk.Key.Menu && !(key == Gdk.Key.F10 &&
                         (modifiers & Gdk.ModifierType.SHIFT_MASK) != 0))) return false;
-                var row = (list.get_focus_child () as ContactRow)
-                    ?? (list.get_selected_row () as ContactRow);
+                var row = list.get_focus_child () as ContactRow;
                 if (row == null) return false;
                 show_contact_menu (row, row.get_width () / 2, row.get_height () / 2);
                 return true;
@@ -265,23 +279,29 @@ namespace Contacts {
 
         private void show_contact_menu (ContactRow row, int x, int y) {
             close_contact_menu ();
-            list.select_row (row);
-            var contact = row.contact;
+            if (!row.is_selected ()) {
+                list.unselect_all ();
+                list.select_row (row);
+            }
+            var selection = selected_contacts ();
+            if (selection.length == 0) return;
             var model = new Menu ();
-            model.append ("Export Contact…", "contact.export");
-            model.append ("Delete…", "contact.delete");
+            model.append (selection.length == 1 ? "Export Contact…"
+                : "Export %d Contacts…".printf (selection.length), "contact.export");
+            model.append (selection.length == 1 ? "Delete Contact…"
+                : "Delete %d Contacts…".printf (selection.length), "contact.delete");
 
             var actions = new SimpleActionGroup ();
             var export_action = new SimpleAction ("export", null);
             export_action.activate.connect (() => {
                 close_contact_menu ();
-                export_file.begin (contact);
+                export_file.begin (selection);
             });
             actions.add_action (export_action);
             var delete_action = new SimpleAction ("delete", null);
             delete_action.activate.connect (() => {
                 close_contact_menu ();
-                delete_dialog (contact);
+                delete_dialog (selection);
             });
             actions.add_action (delete_action);
 
@@ -566,29 +586,50 @@ namespace Contacts {
             update_controls ();
         }
 
-        private void delete_dialog (Contact contact) {
-            var dialog = new Adw.MessageDialog (this, "Delete Contact?",
-                "This removes the contact from the server address book.");
+        private void delete_dialog (GenericArray<Contact> selection) {
+            int count = selection.length;
+            var dialog = new Adw.MessageDialog (this,
+                count == 1 ? "Delete Contact?" : "Delete %d Contacts?".printf (count),
+                "This removes the selected contacts from the server address book.");
             dialog.add_response ("cancel", "Cancel");
             dialog.add_response ("delete", "Delete");
             dialog.set_response_appearance ("delete", Adw.ResponseAppearance.DESTRUCTIVE);
-            dialog.response.connect ((answer) => { if (answer == "delete") delete_card.begin (contact); });
+            dialog.response.connect ((answer) => {
+                if (answer == "delete") delete_contacts.begin (selection);
+            });
             dialog.present ();
         }
 
-        private async void delete_card (Contact contact) {
+        private async void delete_contacts (GenericArray<Contact> selection) {
             var current = book;
             if (busy || current == null) return;
             busy = true;
             update_controls ();
-            bool sent = false;
+            int deleted = 0;
             try {
                 string token = yield store.token (current);
-                yield dav.remove (current, token, contact);
-                sent = true;
-                yield reload (current, token);
+                Error? deletion_error = null;
+                foreach (Contact contact in selection) {
+                    try {
+                        yield dav.remove (current, token, contact);
+                        deleted++;
+                    } catch (Error error) {
+                        deletion_error = error;
+                        break;
+                    }
+                }
+                if (deleted > 0) {
+                    try { yield reload (current, token); }
+                    catch (Error error) {
+                        status.label = "Refresh failed. The list may show deleted contacts.";
+                        if (deletion_error == null) throw error;
+                    }
+                }
+                if (deletion_error != null) throw deletion_error;
+                notice (deleted == 1 ? "Contact deleted." : "%d contacts deleted.".printf (deleted));
             } catch (Error error) {
-                notice (sent ? "Deleted on server. Refresh failed: " + error.message : error.message);
+                notice (deleted == 0 ? error.message
+                    : "%d of %d contacts deleted. %s".printf (deleted, selection.length, error.message));
             }
             busy = false;
             update_controls ();
@@ -656,18 +697,17 @@ namespace Contacts {
             update_controls ();
         }
 
-        private async void export_file (Contact? contact = null) {
+        private async void export_file (GenericArray<Contact>? selection = null) {
             if (busy) return;
             var output = new StringBuilder ();
-            if (contact != null) output.append (contact.card.raw);
-            else foreach (Contact entry in contacts) {
+            foreach (Contact entry in (selection ?? contacts)) {
                 if (output.len > 0 && !output.str.has_suffix ("\n")) output.append ("\r\n");
                 output.append (entry.card.raw);
             }
             try {
                 var picker = new Gtk.FileDialog ();
                 picker.title = "Export vCards";
-                picker.initial_name = contact == null ? "contacts.vcf" : "contact.vcf";
+                picker.initial_name = selection != null && selection.length == 1 ? "contact.vcf" : "contacts.vcf";
                 File file = yield picker.save (this, null);
                 yield file.replace_contents_bytes_async (new Bytes (output.str.data), null, false,
                     FileCreateFlags.PRIVATE | FileCreateFlags.REPLACE_DESTINATION, null, null);
@@ -741,7 +781,7 @@ namespace Contacts {
 
     int main (string[] args) {
         if (args.length == 2 && args[1] == "--version") {
-            stdout.printf ("Contacts 0.3.2\n");
+            stdout.printf ("Contacts 0.3.3\n");
             return 0;
         }
         bool smoke = args.length == 2 && args[1] == "--smoke-test";
