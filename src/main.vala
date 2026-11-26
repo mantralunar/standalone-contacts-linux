@@ -20,7 +20,7 @@ namespace Contacts {
         private Gtk.Button create;
         private Gtk.Button import;
         private Gtk.Button export;
-        private Gtk.PopoverMenu? contact_menu;
+        private Gtk.Popover? contact_menu;
         private ulong contact_menu_closed;
         private Adw.ToastOverlay overlay = new Adw.ToastOverlay ();
 
@@ -285,28 +285,29 @@ namespace Contacts {
             }
             var selection = selected_contacts ();
             if (selection.length == 0) return;
-            var model = new Menu ();
-            model.append (selection.length == 1 ? "Export Contact…"
-                : "Export %d Contacts…".printf (selection.length), "contact.export");
-            model.append (selection.length == 1 ? "Delete Contact…"
-                : "Delete %d Contacts…".printf (selection.length), "contact.delete");
-
-            var actions = new SimpleActionGroup ();
-            var export_action = new SimpleAction ("export", null);
-            export_action.activate.connect (() => {
+            var entries = new Gtk.Box (Gtk.Orientation.VERTICAL, 2);
+            var export_item = new Gtk.Button.with_label (selection.length == 1
+                ? "Export Contact…" : "Export %d Contacts…".printf (selection.length));
+            export_item.halign = Gtk.Align.FILL;
+            export_item.add_css_class ("flat");
+            export_item.clicked.connect (() => {
                 close_contact_menu ();
                 export_file.begin (selection);
             });
-            actions.add_action (export_action);
-            var delete_action = new SimpleAction ("delete", null);
-            delete_action.activate.connect (() => {
+            entries.append (export_item);
+
+            var delete_item = new Gtk.Button.with_label (selection.length == 1
+                ? "Delete Contact…" : "Delete %d Contacts…".printf (selection.length));
+            delete_item.halign = Gtk.Align.FILL;
+            delete_item.add_css_class ("flat");
+            delete_item.clicked.connect (() => {
                 close_contact_menu ();
                 delete_dialog (selection);
             });
-            actions.add_action (delete_action);
+            entries.append (delete_item);
 
-            var menu = new Gtk.PopoverMenu.from_model (model);
-            menu.insert_action_group ("contact", actions);
+            var menu = new Gtk.Popover ();
+            menu.child = entries;
             menu.set_parent (row);
             Gdk.Rectangle location = { x, y, 1, 1 };
             menu.set_pointing_to (location);
@@ -605,31 +606,42 @@ namespace Contacts {
             if (busy || current == null) return;
             busy = true;
             update_controls ();
-            int deleted = 0;
+            var removed = new GenericArray<Contact> ();
+            status.label = selection.length == 1 ? "Deleting contact…"
+                : "Deleting %d contacts…".printf (selection.length);
             try {
                 string token = yield store.token (current);
                 Error? deletion_error = null;
                 foreach (Contact contact in selection) {
                     try {
                         yield dav.remove (current, token, contact);
-                        deleted++;
+                        removed.add (contact);
                     } catch (Error error) {
                         deletion_error = error;
                         break;
                     }
                 }
-                if (deleted > 0) {
+                if (removed.length > 0) {
+                    // Only remove rows whose DELETE succeeded, even if the refresh fails.
+                    foreach (Contact contact in removed) contacts.remove (contact);
+                    render ();
                     try { yield reload (current, token); }
                     catch (Error error) {
-                        status.label = "Refresh failed. The list may show deleted contacts.";
+                        status.label = "Contacts deleted. Refresh failed.";
+                        try { store.save (current, contacts); }
+                        catch (Error cache_error) {
+                            status.label = "Contacts deleted. The offline cache could not be updated.";
+                        }
                         if (deletion_error == null) throw error;
                     }
                 }
                 if (deletion_error != null) throw deletion_error;
-                notice (deleted == 1 ? "Contact deleted." : "%d contacts deleted.".printf (deleted));
+                notice (removed.length == 1 ? "Contact deleted."
+                    : "%d contacts deleted.".printf (removed.length));
             } catch (Error error) {
-                notice (deleted == 0 ? error.message
-                    : "%d of %d contacts deleted. %s".printf (deleted, selection.length, error.message));
+                if (removed.length == 0) status.label = "Delete failed.";
+                notice (removed.length == 0 ? error.message
+                    : "%d of %d contacts deleted. %s".printf (removed.length, selection.length, error.message));
             }
             busy = false;
             update_controls ();
@@ -781,7 +793,7 @@ namespace Contacts {
 
     int main (string[] args) {
         if (args.length == 2 && args[1] == "--version") {
-            stdout.printf ("Contacts 0.3.3\n");
+            stdout.printf ("Contacts 0.3.4\n");
             return 0;
         }
         bool smoke = args.length == 2 && args[1] == "--smoke-test";
