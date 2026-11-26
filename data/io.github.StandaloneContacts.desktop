@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Standalone Contacts
+Comment=Manage CardDAV contacts
+Exec=standalone-contacts
+Icon=io.github.StandaloneContacts
+Terminal=false
+Categories=Office;ContactManagement;
+StartupWMClass=io.github.StandaloneContacts
