@@ -2,15 +2,19 @@ name: Anylinux AppImage Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: appimage-${{ github.ref }}
+  group: appimage-release
   cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      commit: ${{ steps.package.outputs.commit }}
     container: ghcr.io/pkgforge-dev/archlinux:latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -25,6 +29,7 @@ jobs:
             glib-networking ca-certificates adwaita-icon-theme hicolor-icon-theme \
             xorg-server-xvfb xorg-xauth dbus jq
       - name: Compile, test and package x86_64
+        id: package
         run: |
           set -eu
           ARCH=$(uname -m)
@@ -43,7 +48,7 @@ jobs:
 
           cd "$scratch"
           VERSION=$(meson introspect --projectinfo "$scratch/build" | jq -er .version)
-          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
               printf 'Tag %s must match Meson version v%s.\n' "$GITHUB_REF_NAME" "$VERSION" >&2
               exit 1
           fi
@@ -79,6 +84,8 @@ jobs:
           destination="$GITHUB_WORKSPACE/dist"
           mkdir -p "$destination"
           install -m 0755 "$image" "$destination/Standalone-Contacts-$VERSION-$ARCH.AppImage"
+          commit=$(git -c safe.directory="$GITHUB_WORKSPACE" -C "$GITHUB_WORKSPACE" rev-parse HEAD)
+          printf 'version=%s\ncommit=%s\n' "$VERSION" "$commit" >> "$GITHUB_OUTPUT"
       - name: Pass AppImage to release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -100,18 +107,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BUILD_COMMIT: ${{ needs.build.outputs.commit }}
         run: |
           set -eu
-          version=${GITHUB_REF_NAME#v}
-          image="dist/Standalone-Contacts-$version-x86_64.AppImage"
+          tag="v$VERSION"
+          image="dist/Standalone-Contacts-$VERSION-x86_64.AppImage"
           test -s "$image"
-          if gh release view "$GITHUB_REF_NAME" --json assets \
-              --jq '.assets[].name' > release-assets.txt; then
-              if ! grep -Fxq "$(basename "$image")" release-assets.txt; then
-                  gh release upload "$GITHUB_REF_NAME" "$image"
+
+          # Create the tag for a manual run. Verify the commit before publishing either way.
+          if ! gh api "repos/$GH_REPO/commits/$tag" --jq .sha > tag-commit.txt; then
+              gh api --method POST "repos/$GH_REPO/git/refs" \
+                  -f "ref=refs/tags/$tag" -f "sha=$BUILD_COMMIT" >/dev/null
+              gh api "repos/$GH_REPO/commits/$tag" --jq .sha > tag-commit.txt
+          fi
+          if [ "$(cat tag-commit.txt)" != "$BUILD_COMMIT" ]; then
+              printf 'Tag %s already points to a different commit. Bump the version in meson.build.\n' "$tag" >&2
+              exit 1
+          fi
+
+          if gh release view "$tag" --json assets,isDraft > release.json; then
+              if ! jq -e --arg asset "$(basename "$image")" \
+                  '.assets | any(.name == $asset)' release.json >/dev/null; then
+                  gh release upload "$tag" "$image"
               fi
-              gh release edit "$GITHUB_REF_NAME" --draft=false
+              if jq -e '.isDraft' release.json >/dev/null; then
+                  gh release edit "$tag" --draft=false
+              fi
           else
-              gh release create "$GITHUB_REF_NAME" "$image" --verify-tag \
-                --title "Standalone Contacts $GITHUB_REF_NAME" --generate-notes
+              gh release create "$tag" "$image" --verify-tag \
+                --title "Standalone Contacts $tag" --generate-notes
           fi
