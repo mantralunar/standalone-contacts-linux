@@ -741,7 +741,7 @@ namespace Contacts {
 
     int main (string[] args) {
         if (args.length == 2 && args[1] == "--version") {
-            stdout.printf ("Standalone Contacts 0.3.1\n");
+            stdout.printf ("Contacts 0.3.2\n");
             return 0;
         }
         bool smoke = args.length == 2 && args[1] == "--smoke-test";

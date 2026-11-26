@@ -1,18 +1,18 @@
-# Standalone Contacts
+# Contacts
 
 A desktop CardDAV client written in Vala with GTK4, libadwaita, libsoup 3 and libsecret. The two-pane interface follows the system light or dark preference. It works directly with CardDAV and has no Evolution Data Server or GNOME Online Accounts dependency.
 
 ## Publish an AppImage
 
 1. Extract the source archive and upload its **contents** to the root of an empty GitHub repository. Include the hidden `.github` directory. Git push is the simplest way to include hidden files.
-2. Once the workflow is on the default branch, open **Actions → Anylinux AppImage Release → Run workflow**, select `main`, and click **Run workflow**. The workflow uses the version in `meson.build` and creates the matching tag for that commit if needed. Pushing a matching tag such as `v0.3.1` also starts the workflow. Bump the Meson version before releasing a different commit.
+2. Once the workflow is on the default branch, open **Actions → Anylinux AppImage Release → Run workflow**, select `main`, and click **Run workflow**. The workflow uses the version in `meson.build` and creates the matching tag for that commit if needed. Pushing a matching tag such as `v0.3.2` also starts the workflow. Bump the Meson version before releasing a different commit.
 
-   GitHub Actions builds and tests the app on x86_64 using pkgforge's Arch Linux container, the Anylinux setup action, and quick-sharun. The AppImage uses GTK’s Cairo renderer and omits bundled Mesa drivers. After the AppImage passes its startup check, the workflow publishes it under **Releases → v0.3.1 → Assets**.
-3. Download `Standalone-Contacts-0.3.1-x86_64.AppImage` from the release. Make it executable and run it:
+   GitHub Actions builds and tests the app on x86_64 using pkgforge's Arch Linux container, the Anylinux setup action, and quick-sharun. The AppImage uses GTK’s Cairo renderer and omits bundled Mesa drivers. After the AppImage passes its startup check, the workflow publishes it under **Releases → v0.3.2 → Assets**.
+3. Download `Contacts-0.3.2-x86_64.AppImage` from the release. Make it executable and run it:
 
    ```sh
-   chmod +x Standalone-Contacts-0.3.1-x86_64.AppImage
-   ./Standalone-Contacts-0.3.1-x86_64.AppImage
+   chmod +x Contacts-0.3.2-x86_64.AppImage
+   ./Contacts-0.3.2-x86_64.AppImage
    ```
 
    If FUSE mounting fails, run it with `APPIMAGE_EXTRACT_AND_RUN=1`.

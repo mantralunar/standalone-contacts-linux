@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Standalone Contacts
+Name=Contacts
 Comment=Manage CardDAV contacts
 Exec=standalone-contacts
 Icon=io.github.StandaloneContacts
